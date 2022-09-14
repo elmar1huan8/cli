@@ -67,19 +67,7 @@ type PullRequest struct {
 		Nodes      []PullRequestCommit
 	}
 	StatusCheckRollup struct {
-		Nodes []struct {
-			Commit struct {
-				StatusCheckRollup struct {
-					Contexts struct {
-						Nodes    []CheckContext
-						PageInfo struct {
-							HasNextPage bool
-							EndCursor   string
-						}
-					}
-				}
-			}
-		}
+		Nodes []StatusCheckRollupNode
 	}
 
 	Assignees      Assignees
@@ -93,17 +81,52 @@ type PullRequest struct {
 	ReviewRequests ReviewRequests
 }
 
+type StatusCheckRollupNode struct {
+	Commit StatusCheckRollupCommit
+}
+
+type StatusCheckRollupCommit struct {
+	StatusCheckRollup CommitStatusCheckRollup
+}
+
+type CommitStatusCheckRollup struct {
+	Contexts CheckContexts
+}
+
+type CheckContexts struct {
+	Nodes    []CheckContext
+	PageInfo struct {
+		HasNextPage bool
+		EndCursor   string
+	}
+}
+
 type CheckContext struct {
-	TypeName    string    `json:"__typename"`
-	Name        string    `json:"name"`
-	Context     string    `json:"context,omitempty"`
-	State       string    `json:"state,omitempty"`
-	Status      string    `json:"status"`
+	TypeName   string `json:"__typename"`
+	Name       string `json:"name"`
+	IsRequired bool   `json:"isRequired"`
+	CheckSuite struct {
+		WorkflowRun struct {
+			Workflow struct {
+				Name string `json:"name"`
+			} `json:"workflow"`
+		} `json:"workflowRun"`
+	} `json:"checkSuite"`
+	// QUEUED IN_PROGRESS COMPLETED WAITING PENDING REQUESTED
+	Status string `json:"status"`
+	// ACTION_REQUIRED TIMED_OUT CANCELLED FAILURE SUCCESS NEUTRAL SKIPPED STARTUP_FAILURE STALE
 	Conclusion  string    `json:"conclusion"`
 	StartedAt   time.Time `json:"startedAt"`
 	CompletedAt time.Time `json:"completedAt"`
 	DetailsURL  string    `json:"detailsUrl"`
-	TargetURL   string    `json:"targetUrl,omitempty"`
+
+	/* StatusContext fields */
+
+	Context string `json:"context"`
+	// EXPECTED ERROR FAILURE PENDING SUCCESS
+	State     string    `json:"state"`
+	TargetURL string    `json:"targetUrl"`
+	CreatedAt time.Time `json:"createdAt"`
 }
 
 type PRRepository struct {

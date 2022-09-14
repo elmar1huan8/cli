@@ -7,6 +7,7 @@ import (
 
 	"github.com/cli/cli/v2/api"
 	"github.com/cli/cli/v2/internal/ghrepo"
+	"github.com/cli/cli/v2/internal/text"
 	"github.com/cli/cli/v2/pkg/cmd/run/shared"
 	workflowShared "github.com/cli/cli/v2/pkg/cmd/workflow/shared"
 	"github.com/cli/cli/v2/pkg/cmdutil"
@@ -24,19 +25,21 @@ type ListOptions struct {
 	HttpClient func() (*http.Client, error)
 	BaseRepo   func() (ghrepo.Interface, error)
 
-	PlainOutput bool
-	Exporter    cmdutil.Exporter
+	Exporter cmdutil.Exporter
 
 	Limit            int
 	WorkflowSelector string
 	Branch           string
 	Actor            string
+
+	now time.Time
 }
 
 func NewCmdList(f *cmdutil.Factory, runF func(*ListOptions) error) *cobra.Command {
 	opts := &ListOptions{
 		IO:         f.IOStreams,
 		HttpClient: f.HttpClient,
+		now:        time.Now(),
 	}
 
 	cmd := &cobra.Command{
@@ -47,9 +50,6 @@ func NewCmdList(f *cmdutil.Factory, runF func(*ListOptions) error) *cobra.Comman
 		RunE: func(cmd *cobra.Command, args []string) error {
 			// support `-R, --repo` override
 			opts.BaseRepo = f.BaseRepo
-
-			terminal := opts.IO.IsStdoutTTY() && opts.IO.IsStdinTTY()
-			opts.PlainOutput = !terminal
 
 			if opts.Limit < 1 {
 				return cmdutil.FlagErrorf("invalid limit: %v", opts.Limit)
@@ -126,7 +126,7 @@ func listRun(opts *ListOptions) error {
 
 	cs := opts.IO.ColorScheme()
 
-	if !opts.PlainOutput {
+	if tp.IsTTY() {
 		tp.AddField("STATUS", nil, nil)
 		tp.AddField("NAME", nil, nil)
 		tp.AddField("WORKFLOW", nil, nil)
@@ -139,12 +139,12 @@ func listRun(opts *ListOptions) error {
 	}
 
 	for _, run := range runs {
-		if opts.PlainOutput {
-			tp.AddField(string(run.Status), nil, nil)
-			tp.AddField(string(run.Conclusion), nil, nil)
-		} else {
+		if tp.IsTTY() {
 			symbol, symbolColor := shared.Symbol(cs, run.Status, run.Conclusion)
 			tp.AddField(symbol, nil, symbolColor)
+		} else {
+			tp.AddField(string(run.Status), nil, nil)
+			tp.AddField(string(run.Conclusion), nil, nil)
 		}
 
 		tp.AddField(run.CommitMsg(), nil, cs.Bold)
@@ -154,12 +154,8 @@ func listRun(opts *ListOptions) error {
 		tp.AddField(string(run.Event), nil, nil)
 		tp.AddField(fmt.Sprintf("%d", run.ID), nil, cs.Cyan)
 
-		elapsed := run.UpdatedAt.Sub(run.CreatedAt)
-		if elapsed < 0 {
-			elapsed = 0
-		}
-		tp.AddField(elapsed.String(), nil, nil)
-		tp.AddField(utils.FuzzyAgoAbbr(time.Now(), run.CreatedAt), nil, nil)
+		tp.AddField(run.Duration(opts.now).String(), nil, nil)
+		tp.AddField(text.FuzzyAgoAbbr(time.Now(), run.StartedTime()), nil, nil)
 		tp.EndRow()
 	}
 
