@@ -2,28 +2,26 @@ package checks
 
 import (
 	"fmt"
-	"io"
-	"runtime"
+	"net/http"
 	"time"
 
 	"github.com/MakeNowJust/heredoc"
+	"github.com/cli/cli/v2/api"
+	"github.com/cli/cli/v2/internal/browser"
 	"github.com/cli/cli/v2/internal/ghrepo"
+	"github.com/cli/cli/v2/internal/text"
 	"github.com/cli/cli/v2/pkg/cmd/pr/shared"
 	"github.com/cli/cli/v2/pkg/cmdutil"
 	"github.com/cli/cli/v2/pkg/iostreams"
-	"github.com/cli/cli/v2/utils"
 	"github.com/spf13/cobra"
 )
 
 const defaultInterval time.Duration = 10 * time.Second
 
-type browser interface {
-	Browse(string) error
-}
-
 type ChecksOptions struct {
-	IO      *iostreams.IOStreams
-	Browser browser
+	HttpClient func() (*http.Client, error)
+	IO         *iostreams.IOStreams
+	Browser    browser.Browser
 
 	Finder shared.PRFinder
 
@@ -31,14 +29,16 @@ type ChecksOptions struct {
 	WebMode     bool
 	Interval    time.Duration
 	Watch       bool
+	Required    bool
 }
 
 func NewCmdChecks(f *cmdutil.Factory, runF func(*ChecksOptions) error) *cobra.Command {
 	var interval int
 	opts := &ChecksOptions{
-		IO:       f.IOStreams,
-		Browser:  f.Browser,
-		Interval: defaultInterval,
+		HttpClient: f.HttpClient,
+		IO:         f.IOStreams,
+		Browser:    f.Browser,
+		Interval:   defaultInterval,
 	}
 
 	cmd := &cobra.Command{
@@ -86,6 +86,7 @@ func NewCmdChecks(f *cmdutil.Factory, runF func(*ChecksOptions) error) *cobra.Co
 	cmd.Flags().BoolVarP(&opts.WebMode, "web", "w", false, "Open the web browser to show details about checks")
 	cmd.Flags().BoolVarP(&opts.Watch, "watch", "", false, "Watch checks until they finish")
 	cmd.Flags().IntVarP(&interval, "interval", "i", 10, "Refresh interval in seconds when using `--watch` flag")
+	cmd.Flags().BoolVar(&opts.Required, "required", false, "Only show checks that are required")
 
 	return cmd
 }
@@ -104,7 +105,7 @@ func checksRunWebMode(opts *ChecksOptions) error {
 	openURL := ghrepo.GenerateRepoURL(baseRepo, "pull/%d/checks", pr.Number)
 
 	if isTerminal {
-		fmt.Fprintf(opts.IO.ErrOut, "Opening %s in your browser.\n", utils.DisplayURL(openURL))
+		fmt.Fprintf(opts.IO.ErrOut, "Opening %s in your browser.\n", text.DisplayURL(openURL))
 	}
 
 	return opts.Browser.Browse(openURL)
@@ -115,10 +116,24 @@ func checksRun(opts *ChecksOptions) error {
 		return checksRunWebMode(opts)
 	}
 
+	findOptions := shared.FindOptions{
+		Selector: opts.SelectorArg,
+		Fields:   []string{"number", "headRefName"},
+	}
+
+	var pr *api.PullRequest
+	pr, repo, findErr := opts.Finder.Find(findOptions)
+	if findErr != nil {
+		return findErr
+	}
+
+	client, clientErr := opts.HttpClient()
+	if clientErr != nil {
+		return clientErr
+	}
+
 	if opts.Watch {
-		if err := opts.IO.EnableVirtualTerminalProcessing(); err != nil {
-			return err
-		}
+		opts.IO.StartAlternateScreenBuffer()
 	} else {
 		// Only start pager in non-watch mode
 		if err := opts.IO.StartPager(); err == nil {
@@ -131,33 +146,30 @@ func checksRun(opts *ChecksOptions) error {
 	var checks []check
 	var counts checkCounts
 
+	// Do not return err until we can StopAlternateScreenBuffer()
+	var err error
+
 	for {
-		findOptions := shared.FindOptions{
-			Selector: opts.SelectorArg,
-			Fields:   []string{"number", "headRefName", "statusCheckRollup"},
-		}
-		pr, _, err := opts.Finder.Find(findOptions)
+		err = populateStatusChecks(client, repo, pr)
 		if err != nil {
-			return err
+			break
 		}
 
-		checks, counts, err = aggregateChecks(pr)
+		checks, counts, err = aggregateChecks(pr, opts.Required)
 		if err != nil {
-			return err
+			break
 		}
 
-		if opts.Watch {
-			refreshScreen(opts.IO.Out)
-			if counts.Pending != 0 {
-				cs := opts.IO.ColorScheme()
-				fmt.Fprintln(opts.IO.Out, cs.Boldf("Refreshing checks status every %v seconds. Press Ctrl+C to quit.\n", opts.Interval.Seconds()))
-			}
+		if counts.Pending != 0 && opts.Watch {
+			opts.IO.RefreshScreen()
+			cs := opts.IO.ColorScheme()
+			fmt.Fprintln(opts.IO.Out, cs.Boldf("Refreshing checks status every %v seconds. Press Ctrl+C to quit.\n", opts.Interval.Seconds()))
 		}
 
 		printSummary(opts.IO, counts)
 		err = printTable(opts.IO, checks)
 		if err != nil {
-			return err
+			break
 		}
 
 		if counts.Pending == 0 || !opts.Watch {
@@ -167,6 +179,20 @@ func checksRun(opts *ChecksOptions) error {
 		time.Sleep(opts.Interval)
 	}
 
+	opts.IO.StopAlternateScreenBuffer()
+	if err != nil {
+		return err
+	}
+
+	if opts.Watch {
+		// Print final summary to original screen buffer
+		printSummary(opts.IO, counts)
+		err = printTable(opts.IO, checks)
+		if err != nil {
+			return err
+		}
+	}
+
 	if counts.Failed+counts.Pending > 0 {
 		return cmdutil.SilentError
 	}
@@ -174,14 +200,62 @@ func checksRun(opts *ChecksOptions) error {
 	return nil
 }
 
-func refreshScreen(w io.Writer) {
-	if runtime.GOOS == "windows" {
-		// Just clear whole screen; I wasn't able to get the nicer cursor movement thing working
-		fmt.Fprintf(w, "\x1b[2J")
-	} else {
-		// Move cursor to 0,0
-		fmt.Fprint(w, "\x1b[0;0H")
-		// Clear from cursor to bottom of screen
-		fmt.Fprint(w, "\x1b[J")
+func populateStatusChecks(client *http.Client, repo ghrepo.Interface, pr *api.PullRequest) error {
+	apiClient := api.NewClientFromHTTP(client)
+
+	type response struct {
+		Node *api.PullRequest
 	}
+
+	query := fmt.Sprintf(`
+	query PullRequestStatusChecks($id: ID!, $endCursor: String!) {
+		node(id: $id) {
+			...on PullRequest {
+				%s
+			}
+		}
+	}`, api.RequiredStatusCheckRollupGraphQL("$id", "$endCursor"))
+
+	variables := map[string]interface{}{
+		"id": pr.ID,
+	}
+
+	statusCheckRollup := api.CheckContexts{}
+	endCursor := ""
+
+	for {
+		variables["endCursor"] = endCursor
+		var resp response
+		err := apiClient.GraphQL(repo.RepoHost(), query, variables, &resp)
+		if err != nil {
+			return err
+		}
+
+		if len(resp.Node.StatusCheckRollup.Nodes) == 0 {
+			return nil
+		}
+
+		result := resp.Node.StatusCheckRollup.Nodes[0].Commit.StatusCheckRollup.Contexts
+		statusCheckRollup.Nodes = append(
+			statusCheckRollup.Nodes,
+			result.Nodes...,
+		)
+
+		if !result.PageInfo.HasNextPage {
+			break
+		}
+		endCursor = result.PageInfo.EndCursor
+	}
+
+	statusCheckRollup.PageInfo.HasNextPage = false
+
+	pr.StatusCheckRollup.Nodes = []api.StatusCheckRollupNode{{
+		Commit: api.StatusCheckRollupCommit{
+			StatusCheckRollup: api.CommitStatusCheckRollup{
+				Contexts: statusCheckRollup,
+			},
+		},
+	}}
+
+	return nil
 }

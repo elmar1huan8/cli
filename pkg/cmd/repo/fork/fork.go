@@ -14,10 +14,10 @@ import (
 	"github.com/cli/cli/v2/internal/config"
 	"github.com/cli/cli/v2/internal/ghrepo"
 	"github.com/cli/cli/v2/internal/run"
+	"github.com/cli/cli/v2/pkg/cmd/repo/shared"
 	"github.com/cli/cli/v2/pkg/cmdutil"
 	"github.com/cli/cli/v2/pkg/iostreams"
 	"github.com/cli/cli/v2/pkg/prompt"
-	"github.com/cli/cli/v2/utils"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 )
@@ -138,7 +138,7 @@ func forkRun(opts *ForkOptions) error {
 	} else {
 		repoArg := opts.Repository
 
-		if utils.IsURL(repoArg) {
+		if isURL(repoArg) {
 			parsedURL, err := url.Parse(repoArg)
 			if err != nil {
 				return fmt.Errorf("did not understand argument: %w", err)
@@ -179,7 +179,7 @@ func forkRun(opts *ForkOptions) error {
 	apiClient := api.NewClientFromHTTP(httpClient)
 
 	opts.IO.StartProgressIndicator()
-	forkedRepo, err := api.ForkRepo(apiClient, repoToFork, opts.Organization)
+	forkedRepo, err := api.ForkRepo(apiClient, repoToFork, opts.Organization, opts.ForkName)
 	opts.IO.StopProgressIndicator()
 	if err != nil {
 		return fmt.Errorf("failed to fork: %w", err)
@@ -206,8 +206,8 @@ func forkRun(opts *ForkOptions) error {
 		}
 	}
 
-	// Rename the forked repo if ForkName is specified in opts.
-	if opts.ForkName != "" {
+	// Rename the new repo if necessary
+	if opts.ForkName != "" && !strings.EqualFold(forkedRepo.RepoName(), shared.NormalizeRepoName(opts.ForkName)) {
 		forkedRepo, err = api.RenameRepo(apiClient, forkedRepo, opts.ForkName)
 		if err != nil {
 			return fmt.Errorf("could not rename fork: %w", err)
@@ -259,6 +259,7 @@ func forkRun(opts *ForkOptions) error {
 
 		remoteDesired := opts.Remote
 		if opts.PromptRemote {
+			//nolint:staticcheck // SA1019: prompt.Confirm is deprecated: use Prompter
 			err = prompt.Confirm("Would you like to add a remote for the fork?", &remoteDesired)
 			if err != nil {
 				return fmt.Errorf("failed to prompt: %w", err)
@@ -301,6 +302,7 @@ func forkRun(opts *ForkOptions) error {
 	} else {
 		cloneDesired := opts.Clone
 		if opts.PromptClone {
+			//nolint:staticcheck // SA1019: prompt.Confirm is deprecated: use Prompter
 			err = prompt.Confirm("Would you like to clone the fork?", &cloneDesired)
 			if err != nil {
 				return fmt.Errorf("failed to prompt: %w", err)
@@ -326,4 +328,8 @@ func forkRun(opts *ForkOptions) error {
 	}
 
 	return nil
+}
+
+func isURL(s string) bool {
+	return strings.HasPrefix(s, "http:/") || strings.HasPrefix(s, "https:/")
 }

@@ -10,26 +10,23 @@ import (
 
 	"github.com/MakeNowJust/heredoc"
 	"github.com/cli/cli/v2/api"
+	"github.com/cli/cli/v2/internal/browser"
 	"github.com/cli/cli/v2/internal/ghrepo"
+	"github.com/cli/cli/v2/internal/text"
 	issueShared "github.com/cli/cli/v2/pkg/cmd/issue/shared"
 	prShared "github.com/cli/cli/v2/pkg/cmd/pr/shared"
 	"github.com/cli/cli/v2/pkg/cmdutil"
 	"github.com/cli/cli/v2/pkg/iostreams"
 	"github.com/cli/cli/v2/pkg/markdown"
 	"github.com/cli/cli/v2/pkg/set"
-	"github.com/cli/cli/v2/utils"
 	"github.com/spf13/cobra"
 )
-
-type browser interface {
-	Browse(string) error
-}
 
 type ViewOptions struct {
 	HttpClient func() (*http.Client, error)
 	IO         *iostreams.IOStreams
 	BaseRepo   func() (ghrepo.Interface, error)
-	Browser    browser
+	Browser    browser.Browser
 
 	SelectorArg string
 	WebMode     bool
@@ -117,7 +114,7 @@ func viewRun(opts *ViewOptions) error {
 	if opts.WebMode {
 		openURL := issue.URL
 		if opts.IO.IsStdoutTTY() {
-			fmt.Fprintf(opts.IO.ErrOut, "Opening %s in your browser.\n", utils.DisplayURL(openURL))
+			fmt.Fprintf(opts.IO.ErrOut, "Opening %s in your browser.\n", text.DisplayURL(openURL))
 		}
 		return opts.Browser.Browse(openURL)
 	}
@@ -187,8 +184,6 @@ func printRawIssuePreview(out io.Writer, issue *api.Issue) error {
 
 func printHumanIssuePreview(opts *ViewOptions, issue *api.Issue) error {
 	out := opts.IO.Out
-	now := opts.Now()
-	ago := now.Sub(issue.CreatedAt)
 	cs := opts.IO.ColorScheme()
 
 	// Header (Title and State)
@@ -197,8 +192,8 @@ func printHumanIssuePreview(opts *ViewOptions, issue *api.Issue) error {
 		"%s • %s opened %s • %s\n",
 		issueStateTitleWithColor(cs, issue),
 		issue.Author.Login,
-		utils.FuzzyAgo(ago),
-		utils.Pluralize(issue.Comments.TotalCount, "comment"),
+		text.FuzzyAgo(opts.Now(), issue.CreatedAt),
+		text.Pluralize(issue.Comments.TotalCount, "comment"),
 	)
 
 	// Reactions
@@ -231,7 +226,9 @@ func printHumanIssuePreview(opts *ViewOptions, issue *api.Issue) error {
 	if issue.Body == "" {
 		md = fmt.Sprintf("\n  %s\n\n", cs.Gray("No description provided"))
 	} else {
-		md, err = markdown.Render(issue.Body, markdown.WithIO(opts.IO))
+		md, err = markdown.Render(issue.Body,
+			markdown.WithTheme(opts.IO.TerminalTheme()),
+			markdown.WithWrap(opts.IO.TerminalWidth()))
 		if err != nil {
 			return err
 		}
